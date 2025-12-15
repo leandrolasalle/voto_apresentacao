@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import Navbar from './components/Navbar';
 import Hero from './components/Hero';
 import ThesisViewer from './components/ThesisViewer';
@@ -6,6 +6,7 @@ import VotingSimulator from './components/VotingSimulator';
 import AuditDashboard from './components/AuditDashboard';
 import References from './components/References';
 import { AppSection, Candidate, WalletState, Transaction } from './types';
+import { supabase } from './supabaseClient';
 
 // --- CONSTANTS ---
 const STORAGE_PREFIX = 'tcc_v3_';
@@ -33,8 +34,7 @@ const INITIAL_WALLET: WalletState = {
   isMining: false
 };
 
-// --- CUSTOM HOOK ---
-// Abstrai a lógica de ler/salvar no localStorage automaticamente
+// --- CUSTOM HOOK FOR LOCAL STORAGE ---
 function useLocalStorage<T>(key: string, initialValue: T): [T, React.Dispatch<React.SetStateAction<T>>] {
   const prefixedKey = STORAGE_PREFIX + key;
   
@@ -66,18 +66,91 @@ function useLocalStorage<T>(key: string, initialValue: T): [T, React.Dispatch<Re
 function App() {
   const [currentSection, setSection] = useState<AppSection>(AppSection.HOME);
   
-  // State Management with Custom Hook (Cleaner & DRY)
+  // State initialization (Hybrid: Starts with local, updates from cloud if available)
   const [candidates, setCandidates] = useLocalStorage<Candidate[]>('candidates', INITIAL_CANDIDATES);
   const [transactions, setTransactions] = useLocalStorage<Transaction[]>('transactions', INITIAL_TRANSACTIONS);
   const [usedVoterIds, setUsedVoterIds] = useLocalStorage<string[]>('used_voter_ids', []);
   const [wallet, setWallet] = useLocalStorage<WalletState>('wallet', INITIAL_WALLET);
 
-  // Actions wrapped in useCallback to prevent unnecessary child re-renders
+  // --- SUPABASE SYNC ---
+  // If Supabase is connected, fetch real data from cloud
+  useEffect(() => {
+    if (!supabase) return;
+
+    const fetchData = async () => {
+      // 1. Fetch Candidates
+      const { data: remoteCandidates } = await supabase
+        .from('candidates')
+        .select('*')
+        .order('votes', { ascending: false });
+      
+      if (remoteCandidates && remoteCandidates.length > 0) {
+        // Merge with local images since DB only has text data usually (simplified)
+        const mergedCandidates = remoteCandidates.map((rc: any) => {
+           const local = INITIAL_CANDIDATES.find(c => c.id === rc.id);
+           return { ...rc, image: local?.image || "" };
+        });
+        setCandidates(mergedCandidates);
+      }
+
+      // 2. Fetch Transactions
+      const { data: remoteTx } = await supabase
+        .from('transactions')
+        .select('*')
+        .order('id', { ascending: true }); // Show oldest first so we can append
+
+      if (remoteTx && remoteTx.length > 0) {
+        const mappedTx = remoteTx.map((tx: any) => ({
+           hash: tx.hash,
+           blockNumber: tx.block_number,
+           from: tx.from_address,
+           to: "0xContract",
+           timestamp: tx.timestamp,
+           gasUsed: tx.gas_used,
+           candidateId: tx.candidate_id
+        }));
+        // Combine initial demo transactions with real ones
+        setTransactions([...INITIAL_TRANSACTIONS, ...mappedTx]);
+      }
+
+      // 3. Fetch Voters (Simple ID check)
+      const { data: remoteVoters } = await supabase.from('voters').select('voter_id');
+      if (remoteVoters) {
+        setUsedVoterIds(remoteVoters.map((v: any) => v.voter_id));
+      }
+    };
+
+    fetchData();
+
+    // Optional: Realtime subscription could go here
+    const channel = supabase.channel('realtime_votes')
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'candidates' }, (payload) => {
+        setCandidates(curr => curr.map(c => c.id === payload.new.id ? { ...c, votes: payload.new.votes } : c));
+    })
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'transactions' }, (payload) => {
+        const newTx = payload.new;
+        setTransactions(curr => [...curr, {
+           hash: newTx.hash,
+           blockNumber: newTx.block_number,
+           from: newTx.from_address,
+           to: "0xContract",
+           timestamp: newTx.timestamp,
+           gasUsed: newTx.gas_used,
+           candidateId: newTx.candidate_id
+        }]);
+    })
+    .subscribe();
+
+    return () => {
+        supabase.removeChannel(channel);
+    }
+
+  }, [setCandidates, setTransactions, setUsedVoterIds]);
+
+
   const connectWallet = useCallback(() => {
     const randomHex = Array.from({length: 40}, () => Math.floor(Math.random()*16).toString(16)).join('');
     
-    // FIX: Force a completely fresh state object. 
-    // Do NOT use '...prev' here, as it might carry over 'hasVoted: true' from a previous session.
     setWallet({
       isConnected: true, 
       address: `0x${randomHex}`,
@@ -90,19 +163,64 @@ function App() {
     setWallet(INITIAL_WALLET);
   }, [setWallet]);
 
-  const resetSimulation = useCallback(() => {
-    // Clear storage via the setters (which update localStorage automatically)
+  const resetSimulation = useCallback(async () => {
+    // Local Reset
     setCandidates(INITIAL_CANDIDATES);
     setTransactions(INITIAL_TRANSACTIONS);
     setUsedVoterIds([]);
     setWallet(INITIAL_WALLET);
+
+    // If Cloud is connected, we would technically need to clear DB, 
+    // but for safety/demo we might just want to reset local view or alert user.
+    if (supabase) {
+        alert("Atenção: Você está conectado ao banco de dados na nuvem. O reset completo dos dados deve ser feito via painel do Supabase para limpar os votos de todos os dispositivos.");
+    }
   }, [setCandidates, setTransactions, setUsedVoterIds, setWallet]);
 
-  const castVote = useCallback((candidateId: number, voterId: string) => {
+  const castVote = useCallback(async (candidateId: number, voterId: string) => {
     setWallet(prev => ({ ...prev, isMining: true }));
 
-    // Simulate Network Latency
-    setTimeout(() => {
+    // Transaction Data
+    const txHash = `0x${Math.random().toString(16).substr(2, 40)}`;
+    const blockNum = 12406 + transactions.length;
+    const gas = 21000 + Math.floor(Math.random() * 1000);
+    const time = new Date().toLocaleTimeString();
+    const fromAddr = wallet.address || "0xUnknown";
+
+    // Simulate Network Latency (Mining)
+    setTimeout(async () => {
+      
+      if (supabase) {
+          // --- CLOUD MODE ---
+          try {
+             // 1. Register Vote (RPC Call equivalent)
+             const { error: voteError } = await supabase.rpc('increment_vote', { row_id: candidateId });
+             
+             // Fallback if RPC not set up: manual update (less safe but works for demo)
+             if (voteError) {
+                 const current = candidates.find(c => c.id === candidateId);
+                 await supabase.from('candidates').update({ votes: (current?.votes || 0) + 1 }).eq('id', candidateId);
+             }
+
+             // 2. Register Transaction (Ledger)
+             await supabase.from('transactions').insert({
+                 hash: txHash,
+                 block_number: blockNum,
+                 from_address: fromAddr,
+                 timestamp: time,
+                 gas_used: gas,
+                 candidate_id: candidateId
+             });
+
+             // 3. Register Voter
+             await supabase.from('voters').insert({ voter_id: voterId });
+
+          } catch (err) {
+              console.error("Cloud sync failed, falling back to local for UI", err);
+          }
+      }
+
+      // --- LOCAL OPTIMISTIC UPDATE (Visual feedback immediate) ---
       // 1. Update Candidates
       setCandidates(curr => curr.map(c => c.id === candidateId ? { ...c, votes: c.votes + 1 } : c));
 
@@ -110,12 +228,12 @@ function App() {
       setTransactions(curr => [
         ...curr,
         {
-          hash: `0x${Math.random().toString(16).substr(2, 40)}`,
-          blockNumber: 12406 + curr.length,
-          from: wallet.address || "0xUnknown", 
+          hash: txHash,
+          blockNumber: blockNum,
+          from: fromAddr, 
           to: "0xContractVoting",
-          timestamp: new Date().toLocaleTimeString(),
-          gasUsed: 21000 + Math.floor(Math.random() * 1000),
+          timestamp: time,
+          gasUsed: gas,
           candidateId
         }
       ]);
@@ -125,13 +243,21 @@ function App() {
 
       // 4. Update Wallet
       setWallet(prev => ({ ...prev, isMining: false, hasVoted: true }));
+      
     }, 3500);
-  }, [setCandidates, setTransactions, setUsedVoterIds, setWallet, wallet.address]);
+  }, [setCandidates, setTransactions, setUsedVoterIds, setWallet, wallet.address, candidates, transactions.length]);
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 font-sans selection:bg-brand-500 selection:text-white">
       <Navbar currentSection={currentSection} setSection={setSection} />
       
+      {/* Cloud Status Indicator */}
+      {supabase && (
+        <div className="bg-brand-900/30 text-brand-300 text-xs text-center py-1 border-b border-brand-500/20">
+            🟢 Modo Online: Sincronizado com Banco de Dados em Nuvem (Supabase)
+        </div>
+      )}
+
       <main className="animate-fadeIn">
         {currentSection === AppSection.HOME && <Hero setSection={setSection} />}
         {currentSection === AppSection.THESIS && <ThesisViewer />}
