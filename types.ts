@@ -16,6 +16,14 @@ export interface Transaction {
   candidateId: number;
 }
 
+export interface Evaluation {
+  id: number;
+  name: string;
+  grade: number;
+  comment: string;
+  timestamp: string;
+}
+
 export enum AppSection {
   HOME = 'HOME',
   THESIS = 'THESIS',

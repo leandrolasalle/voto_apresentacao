@@ -5,27 +5,23 @@ import ThesisViewer from './components/ThesisViewer';
 import VotingSimulator from './components/VotingSimulator';
 import AuditDashboard from './components/AuditDashboard';
 import References from './components/References';
-import { AppSection, Candidate, WalletState, Transaction } from './types';
+import { AppSection, Candidate, WalletState, Transaction, Evaluation } from './types';
 import { supabase } from './supabaseClient';
 
 // --- CONSTANTS ---
 const STORAGE_PREFIX = 'tcc_v3_';
 
+// ATUALIZAÇÃO: Iniciar com 0 votos para simulação real
 const INITIAL_CANDIDATES: Candidate[] = [
-  { id: 3, name: "Ana Souza", party: "Frente Blockchain", image: "https://picsum.photos/400/300?random=3", votes: 125 },
-  { id: 1, name: "Maria Silva", party: "Partido da Inovação", image: "https://picsum.photos/400/300?random=1", votes: 124 },
-  { id: 2, name: "João Santos", party: "União Digital", image: "https://picsum.photos/400/300?random=2", votes: 123 },
-  { id: 0, name: "Voto em Branco", party: "Abstenção", image: "", votes: 15 },
-  { id: -1, name: "Voto Nulo", party: "Anulado", image: "", votes: 8 },
+  { id: 3, name: "Ana Souza", party: "Frente Blockchain", image: "https://picsum.photos/400/300?random=3", votes: 0 },
+  { id: 1, name: "Maria Silva", party: "Partido da Inovação", image: "https://picsum.photos/400/300?random=1", votes: 0 },
+  { id: 2, name: "João Santos", party: "União Digital", image: "https://picsum.photos/400/300?random=2", votes: 0 },
+  { id: 0, name: "Voto em Branco", party: "Abstenção", image: "", votes: 0 },
+  { id: -1, name: "Voto Nulo", party: "Anulado", image: "", votes: 0 },
 ];
 
-const INITIAL_TRANSACTIONS: Transaction[] = [
-    { hash: "0x8a3b...9c2d", blockNumber: 12401, from: "0x71C...9A21", to: "0xContract", timestamp: "10:02:15", gasUsed: 21000, candidateId: 3 },
-    { hash: "0x1d4f...2e3a", blockNumber: 12402, from: "0x3B2...4C11", to: "0xContract", timestamp: "10:05:33", gasUsed: 21000, candidateId: 1 },
-    { hash: "0x9c1a...5b6d", blockNumber: 12405, from: "0x1A9...8D44", to: "0xContract", timestamp: "10:12:01", gasUsed: 21500, candidateId: 3 },
-    { hash: "0xb2f1...7a9c", blockNumber: 12404, from: "0x5E2...2B99", to: "0xContract", timestamp: "10:09:42", gasUsed: 21000, candidateId: 0 },
-    { hash: "0xe4d2...1b8f", blockNumber: 12407, from: "0x9F1...3C77", to: "0xContract", timestamp: "10:15:22", gasUsed: 21000, candidateId: -1 },
-];
+// ATUALIZAÇÃO: Iniciar sem transações prévias
+const INITIAL_TRANSACTIONS: Transaction[] = [];
 
 const INITIAL_WALLET: WalletState = {
   isConnected: false,
@@ -33,6 +29,11 @@ const INITIAL_WALLET: WalletState = {
   hasVoted: false,
   isMining: false
 };
+
+const INITIAL_EVALUATIONS: Evaluation[] = [
+  { id: 1, name: "Prof. Alessandro", grade: 10, comment: "Excelente demonstração prática dos conceitos de Blockchain.", timestamp: "2024-05-20 14:30" },
+  { id: 2, name: "Visitante", grade: 9, comment: "Interface muito intuitiva, parabéns.", timestamp: "2024-05-21 09:15" }
+];
 
 // --- CUSTOM HOOK FOR LOCAL STORAGE ---
 function useLocalStorage<T>(key: string, initialValue: T): [T, React.Dispatch<React.SetStateAction<T>>] {
@@ -69,6 +70,7 @@ function App() {
   // State initialization (Hybrid: Starts with local, updates from cloud if available)
   const [candidates, setCandidates] = useLocalStorage<Candidate[]>('candidates', INITIAL_CANDIDATES);
   const [transactions, setTransactions] = useLocalStorage<Transaction[]>('transactions', INITIAL_TRANSACTIONS);
+  const [evaluations, setEvaluations] = useLocalStorage<Evaluation[]>('evaluations', INITIAL_EVALUATIONS);
   const [usedVoterIds, setUsedVoterIds] = useLocalStorage<string[]>('used_voter_ids', []);
   const [wallet, setWallet] = useLocalStorage<WalletState>('wallet', INITIAL_WALLET);
 
@@ -118,6 +120,16 @@ function App() {
       if (remoteVoters) {
         setUsedVoterIds(remoteVoters.map((v: any) => v.voter_id));
       }
+
+      // 4. Fetch Evaluations
+      const { data: remoteEvaluations } = await supabase
+        .from('evaluations')
+        .select('*')
+        .order('id', { ascending: false });
+        
+      if (remoteEvaluations && remoteEvaluations.length > 0) {
+        setEvaluations(remoteEvaluations);
+      }
     };
 
     fetchData();
@@ -139,13 +151,16 @@ function App() {
            candidateId: newTx.candidate_id
         }]);
     })
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'evaluations' }, (payload) => {
+      setEvaluations(curr => [payload.new, ...curr]);
+    })
     .subscribe();
 
     return () => {
         supabase.removeChannel(channel);
     }
 
-  }, [setCandidates, setTransactions, setUsedVoterIds]);
+  }, [setCandidates, setTransactions, setUsedVoterIds, setEvaluations]);
 
 
   const connectWallet = useCallback(() => {
@@ -169,13 +184,67 @@ function App() {
     setTransactions(INITIAL_TRANSACTIONS);
     setUsedVoterIds([]);
     setWallet(INITIAL_WALLET);
+    // Nota: Não resetamos as avaliações (Guestbook) para manter o feedback
 
-    // If Cloud is connected, we would technically need to clear DB, 
-    // but for safety/demo we might just want to reset local view or alert user.
+    // Cloud Reset (Supabase)
     if (supabase) {
-        alert("Atenção: Você está conectado ao banco de dados na nuvem. O reset completo dos dados deve ser feito via painel do Supabase para limpar os votos de todos os dispositivos.");
+        const confirmReset = window.confirm("ATENÇÃO: Isso apagará TODOS os votos e transações do banco de dados na nuvem. Deseja zerar o sistema?");
+        
+        if (confirmReset) {
+            try {
+                // 1. Limpar Transações
+                // .neq('id', -1) é um hack para deletar tudo (id not equal to -1)
+                await supabase.from('transactions').delete().neq('id', -1);
+                
+                // 2. Limpar Eleitores que já votaram
+                await supabase.from('voters').delete().neq('id', -1);
+
+                // 3. Zerar votos dos Candidatos
+                // Precisamos atualizar um por um ou via query, aqui faremos um loop simples
+                for (const candidate of INITIAL_CANDIDATES) {
+                    await supabase
+                        .from('candidates')
+                        .update({ votes: 0 })
+                        .eq('id', candidate.id);
+                }
+
+                alert("Sistema zerado com sucesso! O banco de dados está pronto para nova votação.");
+                
+                // Forçar recarregamento para limpar estados residuais
+                window.location.reload();
+
+            } catch (err) {
+                console.error("Erro ao resetar banco:", err);
+                alert("Erro ao tentar limpar o banco de dados. Verifique o console ou as permissões (RLS).");
+            }
+        }
+    } else {
+        alert("Simulação local resetada.");
     }
   }, [setCandidates, setTransactions, setUsedVoterIds, setWallet]);
+
+  const submitEvaluation = useCallback(async (newEval: Omit<Evaluation, 'id'>) => {
+    // 1. Optimistic Update (Local)
+    const tempId = Date.now();
+    const evaluationWithId = { ...newEval, id: tempId };
+    
+    setEvaluations(prev => [evaluationWithId, ...prev]);
+
+    // 2. Supabase Insert
+    if (supabase) {
+      try {
+        await supabase.from('evaluations').insert({
+          name: newEval.name,
+          grade: newEval.grade,
+          comment: newEval.comment,
+          timestamp: newEval.timestamp
+        });
+        // The realtime subscription will handle the update with the real ID
+      } catch (err) {
+        console.error("Error saving evaluation:", err);
+      }
+    }
+  }, [setEvaluations]);
 
   const castVote = useCallback(async (candidateId: number, voterId: string) => {
     setWallet(prev => ({ ...prev, isMining: true }));
@@ -199,7 +268,9 @@ function App() {
              // Fallback if RPC not set up: manual update (less safe but works for demo)
              if (voteError) {
                  const current = candidates.find(c => c.id === candidateId);
-                 await supabase.from('candidates').update({ votes: (current?.votes || 0) + 1 }).eq('id', candidateId);
+                 // Se não encontrou localmente, assume 0
+                 const currentVotes = current ? current.votes : 0;
+                 await supabase.from('candidates').update({ votes: currentVotes + 1 }).eq('id', candidateId);
              }
 
              // 2. Register Transaction (Ledger)
@@ -276,7 +347,9 @@ function App() {
         {currentSection === AppSection.AUDIT && (
           <AuditDashboard candidates={candidates} transactions={transactions} />
         )}
-        {currentSection === AppSection.REFERENCES && <References />}
+        {currentSection === AppSection.REFERENCES && (
+          <References evaluations={evaluations} onSubmitEvaluation={submitEvaluation} />
+        )}
       </main>
 
       {currentSection !== AppSection.HOME && (
