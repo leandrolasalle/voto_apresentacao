@@ -193,14 +193,14 @@ const References: React.FC<ReferencesProps> = ({ evaluations, onSubmitEvaluation
               </button>
             </form>
 
-            {/* FEEDBACK LIST */}
-            <div className="space-y-4 max-h-[400px] overflow-y-auto custom-scrollbar pr-2">
+            {/* FEEDBACK LIST - LIMITADO A 3 ITENS E SEM SCROLL */}
+            <div className="space-y-4">
               <h4 className="text-sm font-bold text-slate-500 uppercase tracking-wider">Últimas Avaliações</h4>
               
               {evaluations.length === 0 ? (
                 <p className="text-slate-500 text-sm italic text-center py-4">Seja o primeiro a avaliar!</p>
               ) : (
-                evaluations.map((ev, idx) => (
+                evaluations.slice(0, 3).map((ev, idx) => (
                   <div key={ev.id || idx} className="bg-slate-900/50 rounded-lg p-3 border border-slate-700/50 text-sm animate-fadeIn">
                     <div className="flex justify-between items-start mb-2">
                       <span className="font-bold text-slate-200">{ev.name}</span>
